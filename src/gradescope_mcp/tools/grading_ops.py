@@ -13,6 +13,7 @@ reads Gradescope's state back afterwards where practical.
 import json
 import logging
 import math
+import os
 import re
 from collections.abc import Mapping
 from typing import Any, Iterable
@@ -164,6 +165,48 @@ def _scoring_assumption(scoring_type: str | None) -> str:
         "assumes negative scoring (unrecognized scoring_type "
         f"`{sanitize_inline(scoring_type)}`)"
     )
+
+
+# Correct-only mode: when this variable is on, the write tools only save
+# full-credit grades. Wrong, partial or unreadable answers stay ungraded for
+# a human; the agent cannot switch it off from a tool call.
+CORRECT_ONLY_ENV = "GRADESCOPE_MCP_CORRECT_ONLY"
+
+
+def correct_only_enabled() -> bool:
+    return os.environ.get(CORRECT_ONLY_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def correct_only_problem(
+    props: dict, apply_ids: Iterable[str] | None, projected: float | None,
+) -> str | None:
+    """Why a grade may not be written in correct-only mode, or ``None``."""
+    if not correct_only_enabled():
+        return None
+    prefix = f"correct-only mode ({CORRECT_ONLY_ENV}) is on: "
+    if _scoring_assumed(_scoring_type(props)):
+        return (
+            prefix + "Gradescope did not report this question's scoring type, "
+            "so full credit cannot be verified"
+        )
+    weight = _to_float((props.get("question") or {}).get("weight"))
+    if weight is None or projected is None:
+        return prefix + "the question's weight is unknown, so full credit cannot be verified"
+    if not apply_ids:
+        return (
+            prefix + "check the rubric item that marks the answer correct "
+            "(e.g. `Correct`); with no item checked Gradescope does not count "
+            "the submission as graded"
+        )
+    if abs(projected - weight) > 1e-9:
+        return (
+            prefix + f"this grade projects {_format_score(projected)}/"
+            f"{_format_score(weight)}, not full credit. Only correct answers are "
+            "graded; leave wrong, partial or unreadable answers ungraded for a human"
+        )
+    return None
 
 
 def _format_score(score: float | None) -> str:
@@ -1498,6 +1541,9 @@ def apply_grade(
         plan = _plan_grade_write(props, rubric_item_ids, point_adjustment, comment)
     except ValueError as e:
         return f"Error: {e}"
+    problem = correct_only_problem(props, plan["apply_set"], plan["projected_score"])
+    if problem:
+        return f"Error: {problem}. Nothing was sent."
 
     question = props.get("question") or {}
     submission = props.get("submission") or {}
@@ -1793,6 +1839,10 @@ def _batch_preview(course_id: str, question_id: str, rows: list[dict]) -> str:
         plan = _plan_grade_write(
             props, row["rubric_item_ids"], row["point_adjustment"], row["comment"]
         )
+        problem = correct_only_problem(props, plan["apply_set"], plan["projected_score"])
+        if problem:
+            problems.append(f"{label}: {problem}")
+            continue
         if row["overwrite"] and _already_holds(props, plan):
             problems.append(
                 f"{label}: overwrite=true, but this submission already holds "
@@ -2085,6 +2135,10 @@ def apply_grade_batch(
             plan = _plan_grade_write(
                 props, row["rubric_item_ids"], row["point_adjustment"], row["comment"]
             )
+            problem = correct_only_problem(props, plan["apply_set"], plan["projected_score"])
+            if problem:
+                failed.append((sid, f"{problem}; not written"))
+                continue
             existing = _describe_existing_grade(props) if _is_graded(props) else None
             if _already_holds(props, plan):
                 unchanged.append((sid, existing))
@@ -2388,6 +2442,7 @@ def create_rubric_item(
 
 def list_question_submissions(
     course_id: str, question_id: str, filter: str = "all",
+    start_from: int | None = None,
 ) -> str:
     """List all Question Submission IDs for a question.
 
@@ -2404,10 +2459,15 @@ def list_question_submissions(
         course_id: The Gradescope course ID.
         question_id: The question ID.
         filter: ``"all"`` (default), ``"ungraded"``, or ``"graded"``.
+        start_from: Optional 1-based position in the full listing (sorted
+            by submission ID, before ``filter``). Only entries at that
+            position or later are returned, so ``120`` means "the 120th
+            submission onwards".
 
     Returns:
-        JSON list of ``{submission_id, student_name, graded}`` entries
-        for the requested question, sorted by submission ID. ``graded`` is
+        JSON list of ``{position, submission_id, student_name, graded}``
+        entries for the requested question, sorted by submission ID.
+        ``position`` is the entry's 1-based place in the full listing. ``graded`` is
         ``null`` when the page does not expose a Score or Graded? column;
         such rows are left out of the ``ungraded``/``graded`` filters and
         counted in the summary.
@@ -2417,6 +2477,10 @@ def list_question_submissions(
 
     if filter not in ("all", "ungraded", "graded"):
         return 'Error: filter must be "all", "ungraded", or "graded".'
+    if start_from is not None and (
+        isinstance(start_from, bool) or not isinstance(start_from, int) or start_from < 1
+    ):
+        return "Error: start_from must be a whole number of 1 or more."
 
     try:
         entries = _fetch_question_submission_entries(course_id, question_id)
@@ -2430,6 +2494,15 @@ def list_question_submissions(
     if not entries:
         return f"No submissions found for question `{question_id}`."
 
+    # Number the full listing in submission-ID order, so a position names
+    # the same submission whatever the filter.
+    entries.sort(key=lambda e: int(e["submission_id"]))
+    total = len(entries)
+    for position, e in enumerate(entries, 1):
+        e["position"] = position
+    if start_from is not None:
+        entries = [e for e in entries if e["position"] >= start_from]
+
     unknown = sum(1 for e in entries if e["graded"] is None)
 
     # Apply filter
@@ -2438,13 +2511,16 @@ def list_question_submissions(
     elif filter == "graded":
         entries = [e for e in entries if e["graded"] is True]
 
-    # Sort by submission_id
-    entries.sort(key=lambda e: int(e["submission_id"]))
-
     summary = (
         f"Found {len(entries)} {'(' + filter + ') ' if filter != 'all' else ''}"
-        f"submissions for question `{question_id}`."
+        f"submissions for question `{question_id}`"
+        + (
+            f" from position {start_from} of {total}."
+            if start_from is not None else "."
+        )
     )
+    if start_from is not None and start_from > total:
+        summary += f" The question has only {total} submissions."
     if unknown:
         summary += (
             f" {unknown} submission(s) have unknown graded status (the page "
@@ -2454,6 +2530,7 @@ def list_question_submissions(
 
     submissions = [
         {
+            "position": e["position"],
             "submission_id": e["submission_id"],
             "student_name": e["student_name"],
             "graded": e["graded"],

@@ -2462,3 +2462,160 @@ def test_group_expected_graded_ids_schema_takes_ids_only() -> None:
         anyio.run(server.mcp.call_tool, "tool_grade_answer_group", {
             **GROUP_OVERWRITE, "expected_graded_ids": ["abc"],
         })
+
+
+# ---------------------------------------------------------------------------
+# Correct-only mode (GRADESCOPE_CORRECT_ONLY) and list start_from
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def correct_only(monkeypatch):
+    monkeypatch.setenv(grading_ops.CORRECT_ONLY_ENV, "1")
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+def test_correct_only_refuses_a_deduction(monkeypatch, correct_only, confirm) -> None:
+    world = FakeGradescope({"11": _sub()}).install(monkeypatch)
+
+    result = grading_ops.apply_grade(C, Q, "11", rubric_item_ids=["200"], confirm_write=confirm)
+
+    assert result.startswith("Error: correct-only mode")
+    assert "projects 6/10, not full credit" in result
+    assert world.writes() == []
+
+
+def test_correct_only_writes_full_credit(monkeypatch, correct_only) -> None:
+    world = FakeGradescope({"11": _sub()}).install(monkeypatch)
+
+    result = grading_ops.apply_grade(C, Q, "11", rubric_item_ids=["100"], confirm_write=True)
+
+    assert result.startswith("✅ Grade saved successfully!")
+    assert _save_payloads(world)["11"]["rubric_items"]["100"] == {"score": "true"}
+
+
+def test_correct_only_needs_a_checked_item(monkeypatch, correct_only) -> None:
+    world = FakeGradescope({"11": _sub()}).install(monkeypatch)
+
+    result = grading_ops.apply_grade(C, Q, "11", rubric_item_ids=[], confirm_write=True)
+
+    assert "check the rubric item that marks the answer correct" in result
+    assert world.writes() == []
+
+
+def test_correct_only_refuses_unknown_scoring_type(monkeypatch, correct_only) -> None:
+    world = FakeGradescope({"11": _sub()}, question={"scoring_type": None}).install(monkeypatch)
+
+    result = grading_ops.apply_grade(C, Q, "11", rubric_item_ids=["100"], confirm_write=True)
+
+    assert "did not report this question's scoring type" in result
+    assert world.writes() == []
+
+
+def test_correct_only_positive_scoring_needs_full_points(monkeypatch, correct_only) -> None:
+    rubric = [
+        {"id": 100, "description": "Correct", "weight": 10},
+        {"id": 200, "description": "Half", "weight": 5},
+    ]
+    world = FakeGradescope(
+        {"11": _sub(), "12": _sub()}, question={"scoring_type": "positive"}, rubric=rubric
+    ).install(monkeypatch)
+
+    assert grading_ops.apply_grade(C, Q, "11", rubric_item_ids=["200"]).startswith(
+        "Error: correct-only mode"
+    )
+    result = grading_ops.apply_grade(C, Q, "12", rubric_item_ids=["100"], confirm_write=True)
+    assert result.startswith("✅ Grade saved successfully!")
+    assert list(_save_payloads(world)) == ["12"]
+
+
+def test_correct_only_batch_preview_refuses_partial_rows(monkeypatch, correct_only) -> None:
+    world = FakeGradescope({"13": _sub(), "14": _sub()}).install(monkeypatch)
+
+    result = grading_ops.apply_grade_batch(C, Q, [
+        {"submission_id": "13", "rubric_item_ids": ["100"]},
+        {"submission_id": "14", "rubric_item_ids": ["300"]},
+    ])
+
+    assert result.startswith("Error: batch refused; nothing was written.")
+    assert "row 1 (14): correct-only mode" in result
+    assert "row 0" not in result
+    assert world.writes() == []
+
+
+def test_correct_only_batch_write_skips_partial_rows(monkeypatch, correct_only) -> None:
+    world = FakeGradescope({"13": _sub(), "14": _sub()}).install(monkeypatch)
+
+    result = grading_ops.apply_grade_batch(C, Q, [
+        {"submission_id": "13", "rubric_item_ids": ["100"]},
+        {"submission_id": "14", "rubric_item_ids": ["200"]},
+    ], confirm_write=True)
+
+    assert list(_save_payloads(world)) == ["13"]
+    assert "`14`: correct-only mode" in result
+    assert "**succeeded:** 1" in result
+
+
+def test_correct_only_off_by_default(monkeypatch) -> None:
+    monkeypatch.delenv(grading_ops.CORRECT_ONLY_ENV, raising=False)
+    FakeGradescope({"11": _sub()}).install(monkeypatch)
+
+    result = grading_ops.apply_grade(C, Q, "11", rubric_item_ids=["200"], confirm_write=True)
+
+    assert result.startswith("✅ Grade saved successfully!")
+
+
+def _numbered_world(monkeypatch) -> None:
+    rows = [
+        ("501", "Ann (a@x.edu)", "", ""),
+        ("503", "Ben (b@x.edu)", "10.0", "true"),
+        ("502", "Cy (c@x.edu)", "", ""),
+        ("504", "Di (d@x.edu)", "", ""),
+    ]
+    FakeGradescope({}, listing_rows=rows).install(monkeypatch)
+
+
+def test_list_start_from_keeps_positions_across_filters(monkeypatch) -> None:
+    _numbered_world(monkeypatch)
+
+    everything = json.loads(grading_ops.list_question_submissions(C, Q, start_from=3))
+    ungraded = json.loads(
+        grading_ops.list_question_submissions(C, Q, filter="ungraded", start_from=3)
+    )
+
+    assert [(e["position"], e["submission_id"]) for e in everything["submissions"]] == [
+        (3, "503"), (4, "504"),
+    ]
+    assert [(e["position"], e["submission_id"]) for e in ungraded["submissions"]] == [
+        (4, "504"),
+    ]
+    assert "from position 3 of 4" in ungraded["summary"]
+
+
+def test_list_start_from_past_the_end(monkeypatch) -> None:
+    _numbered_world(monkeypatch)
+
+    result = json.loads(grading_ops.list_question_submissions(C, Q, start_from=9))
+
+    assert result["submissions"] == []
+    assert "only 4 submissions" in result["summary"]
+
+
+@pytest.mark.parametrize("bad", [0, -1, True])
+def test_list_start_from_rejects_bad_values(monkeypatch, bad) -> None:
+    _numbered_world(monkeypatch)
+
+    assert grading_ops.list_question_submissions(C, Q, start_from=bad).startswith(
+        "Error: start_from"
+    )
+
+
+def test_list_start_from_through_mcp(monkeypatch) -> None:
+    _numbered_world(monkeypatch)
+
+    result = json.loads(_call_tool(
+        "tool_list_question_submissions",
+        {"course_id": C, "question_id": Q, "start_from": 2},
+    ))
+
+    assert [e["position"] for e in result["submissions"]] == [2, 3, 4]

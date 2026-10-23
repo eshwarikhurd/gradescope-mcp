@@ -734,7 +734,10 @@ def test_list_question_submissions_returns_real_student_names(monkeypatch) -> No
     result = json.loads(grading_ops.list_question_submissions("1", "2"))
 
     assert result["submissions"] == [
-        {"submission_id": "777", "student_name": "Adithya Rajendra", "graded": False}
+        {
+            "position": 1, "submission_id": "777",
+            "student_name": "Adithya Rajendra", "graded": False,
+        }
     ]
 
 

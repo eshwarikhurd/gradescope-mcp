@@ -428,6 +428,20 @@ Only after explicit approval:
 If the group is too ambiguous or the batch write looks risky:
 - fall back to individual grading
 
+## Correct-Only Mode
+
+When the server runs with `GRADESCOPE_MCP_CORRECT_ONLY=1` (or the user asks to "only mark the correct ones"):
+- Grade only answers that match the reference answer. Check the rubric item that marks full credit (usually `Correct`, 0 pts under negative scoring) and nothing else
+- Leave wrong, partial, blank and unreadable answers ungraded: do not propose a grade for them. List them for the user with grading links instead
+- With the variable set, the grade tools refuse anything that does not project full credit, has no rubric item checked, or is on a question with unknown scoring type. A refusal means "leave it for a human", not "fix the arguments"
+
+## Starting From A Given Submission Number
+
+When the user says "start from submission 120" (or "student 120 onwards"):
+- Call `tool_list_question_submissions(course_id, question_id, filter="ungraded", start_from=120)`. `start_from` is the 1-based position in the question's listing, sorted by Question Submission ID and counted before `filter`; each entry carries its `position`
+- Grade that list in order. Do not use `tool_get_next_ungraded` for this: it wraps around to the start of the list
+- Confirm the first entry (position, student name) with the user before grading, since their numbering may come from a different sort order in the Gradescope UI
+
 ## Individual Grading
 
 Single-agent navigation:

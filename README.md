@@ -185,6 +185,10 @@ submission is already graded) and repeats that call with
   rows) accept JSON numbers and numeric strings. `true` and `false` are
   rejected (`must be a number, not a boolean`) instead of being read as 1
   and 0. `expected_member_count` must be a whole number of at least 0.
+- `start_from` in `tool_list_question_submissions` is a whole number of at
+  least 1: the 1-based position in the question's listing (sorted by
+  Question Submission ID, counted before `filter`). Each returned entry has
+  its `position`.
 - A batch row's `overwrite` accepts only JSON `true`, `false` or `null`.
   Strings and numbers (`"yes"`, `"true"`, `1`) are rejected (`must be
   true, false or null`) instead of opting the row into an overwrite.
@@ -332,6 +336,12 @@ submission is already graded) and repeats that call with
   required.
 - Every rubric item ID must be in the question's live rubric; otherwise
   nothing is sent (`tool_apply_grade_batch` refuses the whole batch).
+- Correct-only mode (`GRADESCOPE_MCP_CORRECT_ONLY=1`): `tool_apply_grade`,
+  `tool_apply_grade_batch` and `tool_grade_answer_group` refuse any grade
+  that does not project full credit, has no rubric item checked, or is on a
+  question whose scoring type Gradescope did not report. A batch preview
+  refuses the whole batch; at write time such a row fails and is not
+  written.
 - `confidence` (optional): below 0.6 the grade is not written; 0.6 to 0.8
   inclusive it is written but flagged NEEDS HUMAN REVIEW; above 0.8 it is
   normal. NaN and infinite values are rejected.
@@ -490,6 +500,7 @@ creates a new submission.
 | `GRADESCOPE_PASSWORD` | yes | Gradescope account password |
 | `GRADESCOPE_MCP_CACHE_DIR` | no | Private cache root (see [Local cache](#local-cache)); must be owned by you with mode 0700 |
 | `GRADESCOPE_MCP_HTTP_TIMEOUT` | no | Read timeout in seconds for Gradescope requests (default 60); the connect timeout is `min(10, value)`. Invalid values are ignored with a warning |
+| `GRADESCOPE_MCP_CORRECT_ONLY` | no | `1`/`true`/`yes`/`on`: correct-only mode. The grade tools write only full-credit grades with at least one rubric item checked; anything else (wrong, partial, unreadable) is refused and left ungraded for a human. Needs a known scoring type. Read on every call |
 | `GRADESCOPE_MCP_UPLOAD_ROOT` | no | Absolute paths of existing directories, separated by `os.pathsep` (`:` on Linux/macOS, `;` on Windows), that upload files must resolve inside |
 
 At startup, `python -m gradescope_mcp` (and the `gradescope-mcp` console
