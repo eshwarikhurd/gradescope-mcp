@@ -39,10 +39,18 @@ from gradescope_mcp.tools.common import (
     sanitize_inline,
     select_crop_pages,
 )
-from gradescope_mcp.tools.grading import _get_outline_data
+from gradescope_mcp.tools.grading import (
+    _fetch_assignment_scores_csv,
+    _get_outline_data,
+    _normalize_name,
+    _row_email,
+    _row_full_name,
+    _submission_pages_from_html,
+)
 from gradescope_mcp.tools.grading_ops import (
     CONFIDENCE_REJECT_BELOW,
     CONFIDENCE_REVIEW_UP_TO,
+    _fetch_question_submission_entries,
     _get_grading_context,
 )
 
@@ -601,6 +609,63 @@ def _collect_pages(props: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
             continue
         pages.append({**page, "url": normalize_url(url), "_position": position})
     return pages, placeholders
+
+
+def _fetch_full_submission(
+    course_id: str, assignment_id: str, question_id: str, submission_id: str,
+) -> dict[str, Any]:
+    """Every page of the student's whole upload, tagged for this question or not.
+
+    The question grading page only carries the pages tagged for the question.
+    This finds the student of ``submission_id`` in the question's submission
+    list, their assignment (global) submission in the scores export (by
+    email, else by a unique full name), and reads that submission's page.
+
+    Returns ``{assignment_submission_id, submission_url, pdf_url, pages}``,
+    with ``pages`` shaped like ``_collect_pages`` output. Raises
+    ``ValueError`` with the reason when the submission cannot be found.
+    """
+    entries = _fetch_question_submission_entries(course_id, question_id)
+    entry = next(
+        (e for e in entries if str(e.get("submission_id")) == submission_id), None
+    )
+    if entry is None:
+        raise ValueError(
+            f"submission `{submission_id}` is not in question `{question_id}`'s "
+            "submission list"
+        )
+    email = str(entry.get("student_email") or "").strip().casefold()
+    name = _normalize_name(str(entry.get("student_name") or ""))
+    rows, _fields = _fetch_assignment_scores_csv(course_id, assignment_id)
+    matches = [r for r in rows if email and _row_email(r).casefold() == email]
+    if not matches and name:
+        matches = [r for r in rows if _row_full_name(r) == name]
+    if len(matches) != 1:
+        found = "no row" if not matches else f"{len(matches)} rows"
+        raise ValueError(
+            f"the student matched {found} of the assignment's scores export"
+        )
+    global_id = (matches[0].get("Submission ID") or "").strip()
+    if not _NUMERIC_ID_RE.fullmatch(global_id):
+        raise ValueError("the scores export shows no submission for this student")
+
+    conn = get_connection()
+    url = (
+        f"{conn.gradescope_base_url}/courses/{course_id}"
+        f"/assignments/{assignment_id}/submissions/{global_id}"
+    )
+    resp = conn.session.get(url)
+    if resp.status_code != 200:
+        raise ValueError(f"cannot open the full submission (status {resp.status_code})")
+
+    pdf_url, raw_pages = _submission_pages_from_html(resp.text)
+    pages, _placeholders = _collect_pages({"pages": raw_pages})
+    return {
+        "assignment_submission_id": global_id,
+        "submission_url": url,
+        "pdf_url": normalize_url(pdf_url) if pdf_url else None,
+        "pages": pages,
+    }
 
 
 def _collect_submission_context(props: dict[str, Any]) -> dict[str, Any]:
@@ -1330,14 +1395,31 @@ def cache_relevant_pages(
 
     sub = _collect_submission_context(ctx["props"])
     relevant_pages = sub["pages"] if include_all_pages else sub["relevant_pages"]
+    scope = "all pages" if include_all_pages else "crop page(s) and neighbors"
+    full_error = None
+    if not relevant_pages and not sub["typed_answer"]:
+        # No page tagged for this question: cache the whole upload instead.
+        try:
+            relevant_pages = _fetch_full_submission(
+                course_id, assignment_id, question_id, submission_id
+            )["pages"]
+            scope = "every page of the full submission; none is tagged for this question"
+        except AuthError as e:
+            return f"Authentication error: {e}"
+        except Exception as e:
+            full_error = str(e)
     if not relevant_pages:
         skipped = (
             f" ({sub['placeholder_pages']} missing-PDF placeholder page(s) skipped)"
             if sub["placeholder_pages"] else ""
         )
+        full_note = (
+            f" The full submission could not be read: {sanitize_inline(full_error)}."
+            if full_error else ""
+        )
         return (
-            f"Error: No readable page images were found for this submission{skipped}. "
-            "Typed answers are shown by `tool_smart_read_submission`."
+            f"Error: No readable page images were found for this submission{skipped}."
+            f"{full_note} Typed answers are shown by `tool_smart_read_submission`."
         )
 
     try:
@@ -1392,7 +1474,6 @@ def cache_relevant_pages(
             failures.append(f"{label}: could not save ({e})")
 
     total = len(relevant_pages)
-    scope = "all pages" if include_all_pages else "crop page(s) and neighbors"
     if auth_error is not None:
         lines = [f"Authentication error: {auth_error}"]
         if saved_paths:
@@ -1723,6 +1804,7 @@ def smart_read_submission(
     assignment_id: str | None,
     question_id: str,
     submission_id: str,
+    full_submission: bool = False,
 ) -> str:
     """Get a smart, tiered reading plan for a student's submission.
 
@@ -1735,6 +1817,10 @@ def smart_read_submission(
        the previous and next pages.
     3. **Other pages:** every remaining page, because students often tag the
        wrong pages. Without crop regions, every page is listed.
+    4. **Full submission:** when no page is tagged for the question (and
+       there is no typed answer), or ``full_submission`` is true, every page
+       of the student's whole upload and the full-PDF link
+       (``_fetch_full_submission``).
 
     Also reports readiness (pre-read context check, not grading confidence)
     and an honest description of the cached answer-key file.
@@ -1744,6 +1830,8 @@ def smart_read_submission(
         assignment_id: The assignment ID.
         question_id: The question ID.
         submission_id: The question submission ID.
+        full_submission: Also list every page of the whole upload (use it
+            when the answer is not on the pages listed without it).
     """
     if not course_id or not question_id or not submission_id:
         return "Error: course_id, question_id, and submission_id are required."
@@ -1779,11 +1867,29 @@ def smart_read_submission(
         if n is not None:
             page_by_number.setdefault(n, p)
 
+    # Nothing tagged for this question: the answer can still be anywhere in
+    # the student's upload, so read the whole submission.
+    untagged = not pages and not sub["typed_answer"]
+    full: dict[str, Any] | None = None
+    full_error = None
+    if full_submission or untagged:
+        try:
+            full = _fetch_full_submission(
+                course_id, assignment_id, question_id, submission_id
+            )
+        except AuthError as e:
+            return f"Authentication error: {e}"
+        except Exception as e:
+            full_error = str(e)
+    full_pages = full["pages"] if full else []
+
     question_label = _build_question_label(question_id, questions)
 
     # Compute readiness (pre-read context check, NOT grading confidence)
     readiness, reasons, action = _readiness_for(
-        prompt_text, explanation, outline_error, sub, _extract_rubric_summary(props)
+        prompt_text, explanation, outline_error,
+        {**sub, "relevant_pages": full_pages} if untagged and full_pages else sub,
+        _extract_rubric_summary(props),
     )
 
     lines = [
@@ -1861,7 +1967,7 @@ def smart_read_submission(
         for p in pages:
             lines.append(f"- 📄 Page {_page_label(p)}: {p['url']}")
         lines.append("")
-    elif not typed_answer:
+    elif not typed_answer and not full_pages:
         skipped = (
             f" ({sub['placeholder_pages']} missing-PDF placeholder page(s) skipped)"
             if sub["placeholder_pages"] else ""
@@ -1871,6 +1977,37 @@ def smart_read_submission(
             f"This submission has no readable page images and no typed answer{skipped}. "
             "Check it in Gradescope before grading; it may be blank or still processing."
         )
+        if full_error:
+            lines.append(f"The full submission could not be read either: {sanitize_inline(full_error)}.")
+        elif full is not None:
+            lines.append("The full submission has no readable pages either.")
+        lines.append("")
+
+    if full_pages:
+        shown = set(page_by_number)
+        extra = [p for p in full_pages if page_number(p.get("number")) not in shown]
+        lines.append("### Full Submission — Every Page of the Upload")
+        if untagged:
+            lines.append(
+                "No pages are tagged for this question. Read every page below and "
+                "find this question's answer by its question number or content."
+            )
+        else:
+            lines.append(
+                "Pages of the whole upload not listed above"
+                + (f" ({len(full_pages) - len(extra)} already listed)" if len(extra) < len(full_pages) else "")
+                + ":"
+            )
+        if full.get("pdf_url"):
+            lines.append(f"- 📕 Full PDF: {full['pdf_url']}")
+        for p in extra:
+            lines.append(f"- 📄 Page {_page_label(p)}: {p['url']}")
+        if not extra:
+            lines.append("- (no other pages)")
+        lines.append("")
+    elif full_submission and full_error:
+        lines.append("### Full Submission")
+        lines.append(f"⚠️ Could not read the full submission: {sanitize_inline(full_error)}.")
         lines.append("")
 
     # Readiness notes

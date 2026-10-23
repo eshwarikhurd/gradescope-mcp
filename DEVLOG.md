@@ -6,6 +6,30 @@
 
 ---
 
+## Session 16 — 2026-10-23: Correct-only mode, start_from, untagged pages
+
+### What was done
+
+1. **Correct-only mode** (`GRADESCOPE_MCP_CORRECT_ONLY=1`, read on every
+   call). `grading_ops.correct_only_problem` makes `tool_apply_grade`,
+   `tool_apply_grade_batch` and `tool_grade_answer_group` refuse a grade
+   that does not project full credit, checks no rubric item, or is on a
+   question with unknown scoring type. The skill compares final answers
+   only: the user's key is one valid solution, not the required method.
+2. **`start_from`** on `tool_list_question_submissions`: a 1-based
+   position counted before `filter`; every entry carries `position`.
+3. **Untagged pages.** The question grading page carries only the pages
+   tagged for the question. With none tagged (and no typed answer),
+   `tool_smart_read_submission` and `tool_cache_relevant_pages` read the
+   student's whole upload (`grading_workflow._fetch_full_submission`:
+   question submission list → scores export by email, else unique name →
+   `/assignments/{a}/submissions/{global}`); `full_submission=True` adds
+   the upload's untagged pages to the plan. A student who cannot be matched
+   to exactly one scores row is reported, never guessed. The grading
+   context names the untagged case (`pages_note`).
+
+---
+
 ## Session 15 — 2026-10-05: Issues #8 (credential refresh) and #7 (LMS gradebook CSV)
 
 ### What was done

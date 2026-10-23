@@ -408,6 +408,13 @@ def _select_context_pages(
     return select_crop_pages(real, crop_numbers), sorted(crop_numbers), len(real)
 
 
+UNTAGGED_PAGES_NOTE = (
+    "No pages are tagged for this question on its grading page. The student "
+    "may not have tagged pages: call `tool_smart_read_submission`, which then "
+    "lists every page of the full submission."
+)
+
+
 def _heading_title(question: dict, question_id: str) -> str:
     """Title for the context heading; bare numeric titles get a ``Q`` prefix."""
     title = str(question.get("title") or "").strip()
@@ -521,6 +528,7 @@ def get_submission_grading_context(
     crop = parameters.get("crop_rect_list") or []
     selected_pages, crop_pages, real_page_count = _select_context_pages(pages, crop)
     scoring_type = _scoring_type(props)
+    untagged_note = None if real_page_count or text_answer else UNTAGGED_PAGES_NOTE
 
     if output_format == "json":
         result = {
@@ -565,6 +573,8 @@ def get_submission_grading_context(
             "page_count": real_page_count,
             "crop_regions": crop,
         }
+        if untagged_note:
+            result["pages_note"] = untagged_note
         if _scoring_assumed(scoring_type):
             result["scoring_type_note"] = _scoring_label(scoring_type)
         return json.dumps(result, indent=2)
@@ -642,6 +652,8 @@ def get_submission_grading_context(
             lines.append(f"- Page {page_num}{marker}: [View]({normalize_url(p['url'])})")
         if real_page_count > len(selected_pages):
             lines.append(f"- _...and {real_page_count - len(selected_pages)} more pages_")
+    elif untagged_note:
+        lines.append(f"\n### Submission Pages (0)\n{untagged_note}")
 
     return "\n".join(lines)
 

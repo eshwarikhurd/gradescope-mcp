@@ -105,10 +105,10 @@ the private local cache).
 |------|------|-------------|
 | `tool_prepare_grading_artifact` | local cache | Write a question's grading artifact (prompt, scoring type, signed rubric, reference answer or rubric summary, crops, sample pages) and print its path |
 | `tool_assess_submission_readiness` | read-only | Report pre-read context (prompt, reference, rubric, crop, located student work); not grading confidence |
-| `tool_cache_relevant_pages` | local cache | Download a submission's page images (all pages by default; `include_all_pages=False` for crop pages and neighbours) and print the directory |
+| `tool_cache_relevant_pages` | local cache | Download a submission's page images (all pages by default; `include_all_pages=False` for crop pages and neighbours; the full submission when no page is tagged) and print the directory |
 | `tool_prepare_answer_key` | local cache | Write an assignment-wide grading basis (prompts, instructor reference answers) and print its path |
 | `tool_export_lms_gradebook` | local cache | Write the assignment's scores as a Canvas or Brightspace gradebook import CSV (fully graded scores only by default) and print its path |
-| `tool_smart_read_submission` | read-only | Crop-first reading plan: crop page, adjacent pages, other pages; typed answers for online questions |
+| `tool_smart_read_submission` | read-only | Crop-first reading plan: crop page, adjacent pages, other pages; typed answers for online questions. With no page tagged for the question (or `full_submission=True`), every page of the whole upload and the full-PDF link |
 
 ### Answer Groups
 | Tool | Kind | Description |
@@ -341,7 +341,9 @@ submission is already graded) and repeats that call with
   that does not project full credit, has no rubric item checked, or is on a
   question whose scoring type Gradescope did not report. A batch preview
   refuses the whole batch; at write time such a row fails and is not
-  written.
+  written. Whether an answer is correct is the agent's call: the skill has
+  it compare only the student's final answer with your key (equivalent
+  forms count; methods and intermediate steps may differ from the key).
 - `confidence` (optional): below 0.6 the grade is not written; 0.6 to 0.8
   inclusive it is written but flagged NEEDS HUMAN REVIEW; above 0.8 it is
   normal. NaN and infinite values are rejected.

@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 
-from gradescope_mcp.tools import answer_groups
+from gradescope_mcp.tools import answer_groups, grading_ops
 
 
 def test_get_answer_groups_requires_ids() -> None:
@@ -184,3 +184,74 @@ def test_grade_answer_group_rejects_none_rubric_ids() -> None:
     )
     assert "Error" in result
     assert "explicitly specified" in result
+
+
+def _install_group_page(monkeypatch, posted: list) -> None:
+    """A two-member group whose page has known negative scoring, weight 4."""
+    monkeypatch.setattr(
+        answer_groups,
+        "_fetch_answer_groups_json",
+        lambda *_args, **_kwargs: {
+            "groups": [{"id": 3, "title": "cluster"}],
+            "submissions": [
+                {"id": 101, "confirmed_group_id": 3, "graded": False},
+                {"id": 102, "confirmed_group_id": 3, "graded": False},
+            ],
+        },
+    )
+    props = {
+        "urls": {"save_grade": "/courses/1/questions/2/submissions/100/save_grade"},
+        "question": {"weight": 4, "scoring_type": "negative"},
+        "rubric_items": [
+            {"id": 10, "description": "Correct", "weight": 0},
+            {"id": 11, "description": "Wrong", "weight": 4},
+        ],
+        "rubric_item_evaluations": [],
+        "evaluation": {},
+    }
+
+    class _FakeSession:
+        def get(self, _url, **_kw):
+            return SimpleNamespace(
+                status_code=200,
+                text=(
+                    '<html><meta name="csrf-token" content="tok">'
+                    '<div data-react-class="SubmissionGrader" '
+                    f"data-react-props='{json.dumps(props)}'></div></html>"
+                ),
+            )
+
+        def post(self, url, **kwargs):
+            posted.append(url)
+            return SimpleNamespace(status_code=200, json=lambda: {"ok": True}, text='{"ok": true}')
+
+    monkeypatch.setattr(
+        answer_groups,
+        "get_connection",
+        lambda: SimpleNamespace(gradescope_base_url="https://example.com", session=_FakeSession()),
+    )
+
+
+def test_correct_only_refuses_a_group_deduction(monkeypatch) -> None:
+    monkeypatch.setenv(grading_ops.CORRECT_ONLY_ENV, "1")
+    posted: list = []
+    _install_group_page(monkeypatch, posted)
+
+    for kwargs in ({"rubric_item_ids": ["11"]}, {"rubric_item_ids": [], "comment": "ok"}):
+        result = answer_groups.grade_answer_group("1", "2", "3", confirm_write=True, **kwargs)
+        assert result.startswith("Error: correct-only mode")
+        assert "Nothing was sent for answer group `3`" in result
+    assert posted == []
+
+
+def test_correct_only_writes_a_full_credit_group(monkeypatch) -> None:
+    monkeypatch.setenv(grading_ops.CORRECT_ONLY_ENV, "1")
+    posted: list = []
+    _install_group_page(monkeypatch, posted)
+
+    result = answer_groups.grade_answer_group(
+        "1", "2", "3", rubric_item_ids=["10"], confirm_write=True,
+    )
+
+    assert "correct-only" not in result
+    assert posted == ["https://example.com/courses/1/questions/2/submissions/100/save_many_grades"]

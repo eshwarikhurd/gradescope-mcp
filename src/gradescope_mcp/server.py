@@ -1583,7 +1583,8 @@ def tool_cache_relevant_pages(
     to inspect adjacent pages before grading. Missing-PDF placeholders are
     skipped; pages that fail to download are listed while the rest are
     still cached. Each page is streamed and dropped once it exceeds 25 MB
-    or takes more than 120 s.
+    or takes more than 120 s. When no page is tagged for the question,
+    every page of the student's full submission is cached instead.
 
     Args:
         course_id: The Gradescope course ID.
@@ -1636,6 +1637,7 @@ def tool_smart_read_submission(
     question_id: GradescopeID,
     submission_id: GradescopeID,
     assignment_id: OptionalGradescopeID = None,
+    full_submission: bool = False,
 ) -> str:
     """Get a smart, tiered reading plan for a student's submission.
 
@@ -1644,6 +1646,8 @@ def tool_smart_read_submission(
       listed once; no cropped image exists)
     - Tier 3: adjacent pages
     - then all other pages
+    - when no page is tagged for the question, or ``full_submission`` is
+      true: every page of the student's whole upload and the full-PDF link
     Online questions: shows the student's typed answer as untrusted text.
 
     Also reports readiness (pre-read context check, not grading confidence)
@@ -1659,9 +1663,11 @@ def tool_smart_read_submission(
             (unreadable ones are skipped; a run of non-JSON dashboard pages
             or an auth error stops the scan with an error); later lookups
             reuse an in-process memo.
+        full_submission: Also list every page of the whole upload. Use it
+            when the answer is not on the pages listed without it.
     """
     return smart_read_submission(
-        course_id, assignment_id, question_id, submission_id
+        course_id, assignment_id, question_id, submission_id, full_submission
     )
 
 

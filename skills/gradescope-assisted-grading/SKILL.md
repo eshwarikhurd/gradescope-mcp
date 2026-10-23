@@ -431,7 +431,11 @@ If the group is too ambiguous or the batch write looks risky:
 ## Correct-Only Mode
 
 When the server runs with `GRADESCOPE_MCP_CORRECT_ONLY=1` (or the user asks to "only mark the correct ones"):
-- Grade only answers that match the reference answer. Check the rubric item that marks full credit (usually `Correct`, 0 pts under negative scoring) and nothing else
+- Grade only answers whose **final answer** matches the reference answer. Check the rubric item that marks full credit (usually `Correct`, 0 pts under negative scoring) and nothing else
+- The user's solution file is one valid solution, not the required method. Students may use a different method and different intermediate steps; do not compare steps, and do not refuse an answer because its working differs from the key or has a slip that does not change the final answer
+- Compare final answers by value: equivalent forms match (`1/2`, `0.5`, `2/4`; `x = 3` and `3`; factored and expanded forms; reordered terms or set elements; equivalent units, e.g. `0.5 m` and `50 cm`). Use the tolerance the key states for decimals; with none stated, a value that rounds to the key's value at the key's precision matches
+- Find the final answer the student committed to: a boxed or underlined result, the last line of the work, or the "Answer:" line. If the student gives two different final answers, crosses out without a clear replacement, or the final answer cannot be read, it is not a match: leave it for a human
+- When the key gives only a worked solution, write the final answer of each question into the user-reference file before grading (`Final answer: ...`) and confirm those with the user once
 - Leave wrong, partial, blank and unreadable answers ungraded: do not propose a grade for them. List them for the user with grading links instead
 - With the variable set, the grade tools refuse anything that does not project full credit, has no rubric item checked, or is on a question with unknown scoring type. A refusal means "leave it for a human", not "fix the arguments"
 
@@ -465,7 +469,7 @@ For each submission:
 - Readiness (`ready` at 0.80 or more, `partially_ready` at 0.55 or more, otherwise `not_ready`) says how much context exists before you read: prompt, reference answer, rubric, crop regions and whether the student's work was found
 - It is not grading confidence. A high readiness never justifies writing without reading and approval, and a low one is not by itself a reason to skip
 - Scanned exams without structured prompt or reference text usually show `partially_ready`; that is normal
-- `not_ready` with "No student work found" means there are no readable pages and no typed answer: check the submission in Gradescope (blank or missing upload) before grading
+- `not_ready` with "No student work found" means there are no readable pages and no typed answer, even in the full submission: check the submission in Gradescope (blank or missing upload) before grading
 - Distinguish `missing structured context` from `ungradable`
 - Scanned PDF questions may still be gradable from crop/page evidence plus rubric
 - Skip only when the handwriting, crop, or page evidence is still insufficient after bounded reading
@@ -477,6 +481,9 @@ For each submission:
 1. Tiers 1-2: the crop box on the crop page, then the rest of that same page (Gradescope serves whole page images, so it is the same URL; no cropped image exists)
 2. Tier 3: adjacent pages, if the reasoning spills across pages
 3. All other pages, if the answer is still not found (mis-tagged pages)
+4. Full submission: when the student tagged no pages for the question, the plan lists every page of the whole upload and the full-PDF link instead ("Full Submission — Every Page of the Upload"); find the question's answer by its number or content
+
+If the answer is not on any page the plan lists, call `tool_smart_read_submission(..., full_submission=True)` before calling the answer missing: the question's grading page carries only the pages tagged for it, and students forget to tag pages. `tool_cache_relevant_pages` also caches the full submission when nothing is tagged. An answer that is still not found after reading the full submission is left ungraded and listed for the user; it is never graded as blank without the user's say-so.
 
 For online questions, read the typed answer it shows instead.
 
