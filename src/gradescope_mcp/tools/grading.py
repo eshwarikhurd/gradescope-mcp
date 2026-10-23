@@ -806,6 +806,70 @@ def _csv_total_display(row: dict) -> str | None:
     return f"{total} / {max_points}" if max_points else total
 
 
+def _scanned_pages_from_html(
+    html_text: str,
+) -> tuple[str | None, list[tuple[int, int, int, str]]]:
+    """Return the full-PDF URL and every page of a scanned submission page.
+
+    Pages are ``(number, width, height, url)`` sorted by number, one per
+    page number (the first occurrence wins). Both come from JSON embedded in
+    the raw HTML of ``/courses/{c}/assignments/{a}/submissions/{id}``,
+    which lists every page of the upload, tagged or not.
+    """
+    pdf_url = None
+    pdf_match = re.search(
+        r'"url":"(https://production-gradescope-uploads[^"]*?output\.pdf[^"]*?)"',
+        html_text,
+    )
+    if pdf_match:
+        pdf_url = pdf_match.group(1).encode("utf-8").decode("unicode_escape")
+
+    page_data = []
+    for m in re.finditer(
+        r'"number":(\d+),"width":(\d+),"height":(\d+),"url":"(.*?)"',
+        html_text,
+    ):
+        num = int(m.group(1))
+        w, h = int(m.group(2)), int(m.group(3))
+        url = m.group(4).encode("utf-8").decode("unicode_escape")
+        page_data.append((num, w, h, url))
+
+    seen = set()
+    unique_pages = []
+    for p in sorted(page_data):
+        if p[0] not in seen:
+            seen.add(p[0])
+            unique_pages.append(p)
+    return pdf_url, unique_pages
+
+
+def _submission_pages_from_html(html_text: str) -> tuple[str | None, list[dict]]:
+    """Full-PDF URL and every page (``{number, url}``) of a submission page.
+
+    Scanned uploads embed the pages as raw JSON (``_scanned_pages_from_html``);
+    otherwise they are read from the React props (``pages`` and
+    ``assignment_submission.pdf_url``).
+    """
+    pdf_url, scanned = _scanned_pages_from_html(html_text)
+    if scanned:
+        return pdf_url, [{"number": n, "url": url} for n, _w, _h, url in scanned]
+    pages: list[dict] = []
+    soup = BeautifulSoup(html_text, "html.parser")
+    for el in soup.find_all(attrs={"data-react-props": True}):
+        try:
+            props = json.loads(el.get("data-react-props") or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(props, dict):
+            continue
+        meta = props.get("assignment_submission")
+        if pdf_url is None and isinstance(meta, dict) and isinstance(meta.get("pdf_url"), str):
+            pdf_url = meta["pdf_url"]
+        if not pages:
+            pages = [p for p in props.get("pages") or [] if isinstance(p, dict)]
+    return pdf_url, pages
+
+
 def _extract_scanned_pdf_content(html_text: str, student_name: str,
                                   student_email: str, sub_id: str,
                                   csv_total: str | None = None) -> str:
@@ -824,33 +888,9 @@ def _extract_scanned_pdf_content(html_text: str, student_name: str,
         lines.append(f"**Total Score:** {csv_total} (from the scores export)")
     lines.append("**Format:** Scanned PDF Exam\n")
 
-    # Extract full PDF URL
-    pdf_match = re.search(
-        r'"url":"(https://production-gradescope-uploads[^"]*?output\.pdf[^"]*?)"',
-        html_text,
-    )
-    if pdf_match:
-        pdf_url = pdf_match.group(1).encode("utf-8").decode("unicode_escape")
+    pdf_url, unique_pages = _scanned_pages_from_html(html_text)
+    if pdf_url:
         lines.append(f"**Full PDF:** [Download]({pdf_url})\n")
-
-    # Extract individual page images
-    page_data = []
-    for m in re.finditer(
-        r'"number":(\d+),"width":(\d+),"height":(\d+),"url":"(.*?)"',
-        html_text,
-    ):
-        num = int(m.group(1))
-        w, h = int(m.group(2)), int(m.group(3))
-        url = m.group(4).encode("utf-8").decode("unicode_escape")
-        page_data.append((num, w, h, url))
-
-    # Deduplicate by page number (keep first occurrence)
-    seen = set()
-    unique_pages = []
-    for p in sorted(page_data):
-        if p[0] not in seen:
-            seen.add(p[0])
-            unique_pages.append(p)
 
     if unique_pages:
         lines.append(f"### Scanned Pages ({len(unique_pages)} pages)\n")

@@ -1217,13 +1217,17 @@ def tool_list_question_submissions(
     course_id: GradescopeID,
     question_id: GradescopeID,
     filter: Literal["all", "ungraded", "graded"] = "all",
+    start_from: Annotated[Count | None, Field(ge=1)] = None,
 ) -> str:
     """List all Question Submission IDs for a question.
 
     Use this to pre-allocate submission IDs to subagents for parallel
-    grading. Returns **Question Submission IDs** (not Global IDs) that
-    work directly with ``get_submission_grading_context`` and ``apply_grade``,
-    as JSON entries ``{submission_id, student_name, graded}`` sorted by ID.
+    grading, or to grade from a given submission number onwards. Returns
+    **Question Submission IDs** (not Global IDs) that work directly with
+    ``get_submission_grading_context`` and ``apply_grade``, as JSON entries
+    ``{position, submission_id, student_name, graded}`` sorted by ID.
+    ``position`` is the 1-based place in the full listing (before
+    ``filter``), so it names the same submission whatever the filter.
     ``graded`` may be null when the page exposes no Score/Graded? column;
     such rows are left out of the "ungraded"/"graded" filters and counted
     in the summary.
@@ -1232,8 +1236,10 @@ def tool_list_question_submissions(
         course_id: The Gradescope course ID.
         question_id: The question ID.
         filter: "all" (default), "ungraded", or "graded".
+        start_from: Optional 1-based position; only submissions at that
+            position or later are listed (e.g. 120 = the 120th onwards).
     """
-    return list_question_submissions(course_id, question_id, filter)
+    return list_question_submissions(course_id, question_id, filter, start_from)
 
 
 @gs_tool(read_only("Map students to question submissions"))
@@ -1577,7 +1583,8 @@ def tool_cache_relevant_pages(
     to inspect adjacent pages before grading. Missing-PDF placeholders are
     skipped; pages that fail to download are listed while the rest are
     still cached. Each page is streamed and dropped once it exceeds 25 MB
-    or takes more than 120 s.
+    or takes more than 120 s. When no page is tagged for the question,
+    every page of the student's full submission is cached instead.
 
     Args:
         course_id: The Gradescope course ID.
@@ -1630,6 +1637,7 @@ def tool_smart_read_submission(
     question_id: GradescopeID,
     submission_id: GradescopeID,
     assignment_id: OptionalGradescopeID = None,
+    full_submission: bool = False,
 ) -> str:
     """Get a smart, tiered reading plan for a student's submission.
 
@@ -1638,6 +1646,8 @@ def tool_smart_read_submission(
       listed once; no cropped image exists)
     - Tier 3: adjacent pages
     - then all other pages
+    - when no page is tagged for the question, or ``full_submission`` is
+      true: every page of the student's whole upload and the full-PDF link
     Online questions: shows the student's typed answer as untrusted text.
 
     Also reports readiness (pre-read context check, not grading confidence)
@@ -1653,9 +1663,11 @@ def tool_smart_read_submission(
             (unreadable ones are skipped; a run of non-JSON dashboard pages
             or an auth error stops the scan with an error); later lookups
             reuse an in-process memo.
+        full_submission: Also list every page of the whole upload. Use it
+            when the answer is not on the pages listed without it.
     """
     return smart_read_submission(
-        course_id, assignment_id, question_id, submission_id
+        course_id, assignment_id, question_id, submission_id, full_submission
     )
 
 

@@ -34,6 +34,7 @@ from gradescope_mcp.tools.common import (
 )
 from gradescope_mcp.tools.grading_ops import (
     _compute_new_score,
+    correct_only_problem,
     _scoring_assumed,
     _scoring_assumption,
     _scoring_type,
@@ -1012,6 +1013,9 @@ def grade_answer_group(
     projected, _ = _compute_new_score(
         {**props, "rubric_items": rubric_items}, known_ids, point_adjustment
     )
+    problem = correct_only_problem(props, known_ids, projected)
+    if problem:
+        return f"Error: {problem}. Nothing was sent for answer group `{group_id}`."
     weight = question.get("weight", "?")
     scoring_type = _scoring_type(props)
     scoring_assumed = _scoring_assumed(scoring_type)
